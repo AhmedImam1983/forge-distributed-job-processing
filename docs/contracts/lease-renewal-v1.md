@@ -90,6 +90,19 @@ Reusing the same `renewRequestId` with different parameters must return an idemp
 
 A new `renewRequestId` is used for a new logical renewal operation. If the outcome of a prior request is unknown, the worker must resolve it by retrying that same request before issuing a new logical renewal.
 
+Every definitive first-time renewal outcome, including
+rejections, must be durably recorded against the
+renewRequestId and original request parameters.
+
+The outcome record must be committed atomically with any
+state change that produces the outcome.
+
+Replays must return the recorded outcome while reporting
+current claim status separately.
+
+Transient failures whose outcome was not committed may be
+retried using the same renewRequestId.
+
 ## Renewal Outcomes
 
 The control application must distinguish these renewal outcomes:
