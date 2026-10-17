@@ -49,3 +49,26 @@ Status: Proposed test specification
 - Worker A cannot renew the expired lease or commit a result
   using its stale claim.
 - At most one current claim is valid for the job.
+
+## Test 3: Claim Succeeds but Response Is Lost
+
+### Given
+
+- A job exists in the Queued state.
+- Worker A submits a claim request with claimRequestId A.
+- The control application successfully records the claim.
+
+### When
+
+- The claim response is lost due to a network failure.
+- Worker A retries the request using the same claimRequestId.
+
+### Expected Results
+
+- No new execution attempt is created.
+- If the original claim is still valid, the same attemptId
+  and fencingToken are returned.
+- If the original claim has expired or been superseded,
+  the worker is informed that ownership is no longer valid.
+- An expired claim is never restored implicitly.
+- At most one current claim is valid for the job.
