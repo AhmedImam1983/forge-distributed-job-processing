@@ -11,7 +11,9 @@ PostgreSQL is the authoritative source of job state.
 
 ## Job States
 
-- Queued: The job is eligible to be scheduled or claimed.
+- Queued: The job is waiting to be scheduled or claimed.
+  It may be temporarily ineligible until its next eligible
+  time, for example, during retry backoff.
 - Running: The job has a current recorded execution attempt;
  its claim is usable only while the lease is valid.
 - CancelRequested: Cancellation was requested while a claim
