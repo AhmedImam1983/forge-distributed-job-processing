@@ -1,0 +1,44 @@
+# C++ / CMake / Ninja
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+.ninja_deps
+.ninja_log
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+
+# .NET / Visual Studio
+bin/
+obj/
+.vs/
+*.user
+*.suo
+
+# Go
+/vendor/
+*.test
+coverage.out
+
+# IDEs and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# Logs and local test output
+*.log
+/test-results/
+/artifacts/
