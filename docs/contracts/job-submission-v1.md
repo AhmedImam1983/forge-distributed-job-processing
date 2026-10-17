@@ -39,6 +39,14 @@ limits are implementation-design concerns.
 
 Large input files must be referenced rather than embedded
 in broker messages.
+An input artifact reference must identify stable content
+for the lifetime of the accepted job.
+
+A reference to mutable content must include an immutable
+version identifier or a content digest that can be verified.
+
+Retries and re-execution of the same accepted job must not
+silently process different input content.
 
 ## Request Identity and Idempotency
 
