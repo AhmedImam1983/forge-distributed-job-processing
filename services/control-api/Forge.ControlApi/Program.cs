@@ -142,8 +142,20 @@ builder.Services
             !string.IsNullOrWhiteSpace(options.Password) &&
             !string.IsNullOrWhiteSpace(options.ExchangeName) &&
             !string.IsNullOrWhiteSpace(options.QueueName) &&
-            !string.IsNullOrWhiteSpace(options.RoutingKey),
-        "RabbitMQ configuration is incomplete.")
+            !string.IsNullOrWhiteSpace(options.RoutingKey) &&
+            (
+                (
+                    string.IsNullOrWhiteSpace(options.DeadLetterExchangeName) &&
+                    string.IsNullOrWhiteSpace(options.DeadLetterQueueName) &&
+                    string.IsNullOrWhiteSpace(options.DeadLetterRoutingKey)
+                ) ||
+                (
+                    !string.IsNullOrWhiteSpace(options.DeadLetterExchangeName) &&
+                    !string.IsNullOrWhiteSpace(options.DeadLetterQueueName) &&
+                    !string.IsNullOrWhiteSpace(options.DeadLetterRoutingKey)
+                )
+            ),
+        "RabbitMQ configuration is incomplete or DLQ settings are partial.")
     .ValidateOnStart();
 
 builder.Services.AddSingleton<RabbitMqConnectionProvider>();
