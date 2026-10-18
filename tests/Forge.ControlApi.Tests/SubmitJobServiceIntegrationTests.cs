@@ -1305,6 +1305,514 @@ var rejected = Assert.Single(
             .ToListAsync());
     }
 
+
+    [Fact]
+    public async Task CompleteAsync_SuccessfulResult_PersistsCompletion()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-success";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://result/1","count":3}""");
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(200, result.StatusCode);
+        var response = DeserializeCompletionResponse(result);
+        Assert.Equal("AcceptedSucceeded", response.Outcome);
+        Assert.False(response.IsReplay);
+        Assert.Equal("Succeeded", response.CurrentJobStatus);
+        Assert.Equal("Succeeded", response.CurrentAttemptStatus);
+
+        await using var verify = CreateDbContext();
+        var job = await verify.Jobs.SingleAsync(x => x.JobId == jobId);
+        var attempt = await verify.JobAttempts.SingleAsync(
+            x => x.AttemptId == claim.AttemptId);
+        var record = await verify.CompletionRequests.SingleAsync();
+
+        Assert.Equal(JobStatus.Succeeded, job.Status);
+        Assert.NotNull(job.ResultDescriptorJson);
+        using var savedResult = JsonDocument.Parse(job.ResultDescriptorJson!);
+        Assert.Equal(3, savedResult.RootElement.GetProperty("count").GetInt32());
+
+        Assert.Equal(JobAttemptStatus.Succeeded, attempt.Status);
+        Assert.NotNull(attempt.CompletedAt);
+        Assert.Equal(request.CompletionRequestId, record.CompletionRequestId);
+        Assert.Equal(CompletionOutcome.AcceptedSucceeded, record.Outcome);
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_SameRequest_ReplaysOriginalOutcome()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-replay";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://result/replay"}""");
+
+        await using (var db = CreateDbContext())
+        {
+            var first = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+            Assert.Equal(200, first.StatusCode);
+            Assert.False(DeserializeCompletionResponse(first).IsReplay);
+        }
+
+        CompleteJobResult replay;
+        await using (var db = CreateDbContext())
+        {
+            replay = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(200, replay.StatusCode);
+        var response = DeserializeCompletionResponse(replay);
+        Assert.Equal("AcceptedSucceeded", response.Outcome);
+        Assert.True(response.IsReplay);
+        Assert.Equal("Succeeded", response.CurrentJobStatus);
+        Assert.Equal("Succeeded", response.CurrentAttemptStatus);
+
+        await using var verify = CreateDbContext();
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+        Assert.Single(await verify.JobAttempts.ToListAsync());
+        Assert.Equal(
+            JobStatus.Succeeded,
+            (await verify.Jobs.SingleAsync(x => x.JobId == jobId)).Status);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_SameRequestIdDifferentResult_ReturnsConflict()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-conflict";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+        var requestId = Guid.NewGuid();
+
+        var originalRequest = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://original"}""",
+            requestId: requestId);
+
+        await using (var db = CreateDbContext())
+        {
+            var first = await CreateCompletionService(db).CompleteAsync(
+                originalRequest, CancellationToken.None);
+            Assert.Equal(200, first.StatusCode);
+        }
+
+        var conflictingRequest = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://different"}""",
+            requestId: requestId);
+
+        CompleteJobResult conflict;
+        await using (var db = CreateDbContext())
+        {
+            conflict = await CreateCompletionService(db).CompleteAsync(
+                conflictingRequest, CancellationToken.None);
+        }
+
+        Assert.Equal(409, conflict.StatusCode);
+        var response = DeserializeCompletionResponse(conflict);
+        Assert.Equal("IdempotencyKeyConflict", response.Outcome);
+        Assert.Equal("AcceptedSucceeded", response.OriginalOutcome);
+        Assert.False(response.IsReplay);
+
+        await using var verify = CreateDbContext();
+        var job = await verify.Jobs.SingleAsync(x => x.JobId == jobId);
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+        var conflictRecord = await verify.CompletionRequestConflicts
+            .SingleAsync();
+        Assert.Equal(requestId, conflictRecord.CompletionRequestId);
+        Assert.Equal(
+            CompletionOutcome.IdempotencyKeyConflict,
+            conflictRecord.Outcome);
+
+        using var savedResult = JsonDocument.Parse(job.ResultDescriptorJson!);
+        Assert.Equal(
+            "test://original",
+            savedResult.RootElement.GetProperty("artifactUri").GetString());
+    }
+
+    private static CompletionService CreateCompletionService(
+        ForgeDbContext db,
+        params string[] retryableFailureCodes)
+    {
+        return new CompletionService(
+            db,
+            Options.Create(new LeaseRecoveryOptions
+            {
+                BatchSize = 50,
+                MaxAttempts = 3,
+                InitialRetryDelaySeconds = 5,
+                MaxRetryDelaySeconds = 300,
+                RetryableFailureCodes = retryableFailureCodes.ToList()
+            }));
+    }
+
+    private static CompleteJobResponse DeserializeCompletionResponse(
+        CompleteJobResult result)
+    {
+        return JsonSerializer.Deserialize<CompleteJobResponse>(
+            result.ResponseBodyJson,
+            JsonOptions)!;
+    }
+
+    private static CompleteJobRequest CreateCompletionRequest(
+        Guid jobId,
+        ClaimJobResponse claim,
+        string workerId,
+        string outcome,
+        string? resultJson = null,
+        string? failureCode = null,
+        string? failureMessage = null,
+        string? cancellationDetails = null,
+        Guid? requestId = null,
+        long? fencingToken = null)
+    {
+        JsonElement? resultDescriptor = null;
+
+        if (resultJson is not null)
+        {
+            using var document = JsonDocument.Parse(resultJson);
+            resultDescriptor = document.RootElement.Clone();
+        }
+
+        return new CompleteJobRequest
+        {
+            CompletionRequestId = requestId ?? Guid.NewGuid(),
+            JobId = jobId,
+            AttemptId = claim.AttemptId!.Value,
+            WorkerInstanceId = workerId,
+            FencingToken = fencingToken ?? claim.FencingToken!.Value,
+            Outcome = outcome,
+            ResultDescriptor = resultDescriptor,
+            FailureCode = failureCode,
+            FailureMessage = failureMessage,
+            CancellationDetails = cancellationDetails
+        };
+    }
+
+
+    [Fact]
+    public async Task CompleteAsync_RetryableFailure_SchedulesRetry()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-retryable";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Failed",
+            failureCode: "DEPENDENCY_UNAVAILABLE",
+            failureMessage: "The dependency is temporarily unavailable.");
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(
+                db, "DEPENDENCY_UNAVAILABLE").CompleteAsync(
+                    request, CancellationToken.None);
+        }
+
+        Assert.Equal(200, result.StatusCode);
+        Assert.Equal(
+            "AcceptedRetryScheduled",
+            DeserializeCompletionResponse(result).Outcome);
+
+        await using var verify = CreateDbContext();
+        var job = await verify.Jobs.SingleAsync(x => x.JobId == jobId);
+        var attempt = await verify.JobAttempts.SingleAsync(
+            x => x.AttemptId == claim.AttemptId);
+
+        Assert.Equal(JobStatus.Queued, job.Status);
+        Assert.Equal(JobAttemptStatus.Failed, attempt.Status);
+        Assert.NotNull(attempt.CompletedAt);
+        Assert.Single(await verify.OutboxMessages
+            .Where(x => x.JobId == jobId)
+            .ToListAsync());
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_NonRetryableFailure_FailsJob()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-nonretryable";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Failed",
+            failureCode: "INVALID_INPUT",
+            failureMessage: "The submitted input is invalid.");
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(200, result.StatusCode);
+        Assert.Equal(
+            "AcceptedFailed",
+            DeserializeCompletionResponse(result).Outcome);
+
+        await using var verify = CreateDbContext();
+        var job = await verify.Jobs.SingleAsync(x => x.JobId == jobId);
+        var attempt = await verify.JobAttempts.SingleAsync(
+            x => x.AttemptId == claim.AttemptId);
+
+        Assert.Equal(JobStatus.Failed, job.Status);
+        Assert.Equal(JobAttemptStatus.Failed, attempt.Status);
+        Assert.NotNull(attempt.CompletedAt);
+        Assert.Empty(await verify.OutboxMessages
+            .Where(x => x.JobId == jobId)
+            .ToListAsync());
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+
+    [Fact]
+    public async Task CompleteAsync_ExpiredLease_RejectsCompletion()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-expired";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+
+        await using (var db = CreateDbContext())
+        {
+            var attempt = await db.JobAttempts.SingleAsync(
+                x => x.AttemptId == claim.AttemptId);
+            var expiredAt = DateTimeOffset.UtcNow.AddMinutes(-2);
+            attempt.ClaimedAt = expiredAt.AddMinutes(-5);
+            attempt.LeaseExpiresAt = expiredAt;
+            await db.SaveChangesAsync();
+        }
+
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://expired"}""");
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(409, result.StatusCode);
+        Assert.Equal(
+            "LeaseExpiredOrLost",
+            DeserializeCompletionResponse(result).Outcome);
+
+        await using var verify = CreateDbContext();
+        Assert.Equal(
+            JobStatus.Running,
+            (await verify.Jobs.SingleAsync(x => x.JobId == jobId)).Status);
+        Assert.Equal(
+            JobAttemptStatus.Running,
+            (await verify.JobAttempts.SingleAsync(
+                x => x.AttemptId == claim.AttemptId)).Status);
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_WrongFencingToken_RejectsCompletion()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-stale-token";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://stale-token"}""",
+            fencingToken: claim.FencingToken!.Value + 1);
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(409, result.StatusCode);
+        Assert.Equal(
+            "NotOwnerOrSuperseded",
+            DeserializeCompletionResponse(result).Outcome);
+
+        await using var verify = CreateDbContext();
+        Assert.Equal(
+            JobStatus.Running,
+            (await verify.Jobs.SingleAsync(x => x.JobId == jobId)).Status);
+        Assert.Equal(
+            JobAttemptStatus.Running,
+            (await verify.JobAttempts.SingleAsync(
+                x => x.AttemptId == claim.AttemptId)).Status);
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_SuccessWhileCancellationPending_IsRejected()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-cancel-pending";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+
+        await using (var db = CreateDbContext())
+        {
+            var job = await db.Jobs.SingleAsync(x => x.JobId == jobId);
+            job.Status = JobStatus.CancelRequested;
+            await db.SaveChangesAsync();
+        }
+
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://cancel-race"}""");
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(409, result.StatusCode);
+        Assert.Equal(
+            "CancellationPending",
+            DeserializeCompletionResponse(result).Outcome);
+
+        await using var verify = CreateDbContext();
+        Assert.Equal(
+            JobStatus.CancelRequested,
+            (await verify.Jobs.SingleAsync(x => x.JobId == jobId)).Status);
+        Assert.Equal(
+            JobAttemptStatus.Running,
+            (await verify.JobAttempts.SingleAsync(
+                x => x.AttemptId == claim.AttemptId)).Status);
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_CancelledJobRequest_AcceptsCancellation()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-complete-cancelled";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+
+        await using (var db = CreateDbContext())
+        {
+            var job = await db.Jobs.SingleAsync(x => x.JobId == jobId);
+            job.Status = JobStatus.CancelRequested;
+            await db.SaveChangesAsync();
+        }
+
+        var request = CreateCompletionRequest(
+            jobId, claim, worker, "Cancelled",
+            cancellationDetails: "Worker stopped after cancellation request.");
+
+        CompleteJobResult result;
+        await using (var db = CreateDbContext())
+        {
+            result = await CreateCompletionService(db).CompleteAsync(
+                request, CancellationToken.None);
+        }
+
+        Assert.Equal(200, result.StatusCode);
+        var response = DeserializeCompletionResponse(result);
+        Assert.Equal("AcceptedCancelled", response.Outcome);
+        Assert.Equal("Cancelled", response.CurrentJobStatus);
+        Assert.Equal("Cancelled", response.CurrentAttemptStatus);
+
+        await using var verify = CreateDbContext();
+        Assert.Equal(
+            JobStatus.Cancelled,
+            (await verify.Jobs.SingleAsync(x => x.JobId == jobId)).Status);
+        Assert.Equal(
+            JobAttemptStatus.Cancelled,
+            (await verify.JobAttempts.SingleAsync(
+                x => x.AttemptId == claim.AttemptId)).Status);
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+    }
+
+
+    [Fact]
+    public async Task CompleteAsync_RepeatedIdempotencyConflict_ReplaysRecordedConflict()
+    {
+        await ResetDatabaseAsync();
+
+        const string worker = "worker-conflict-replay";
+        var (jobId, claim) = await CreateClaimedJobAsync(worker);
+        var requestId = Guid.NewGuid();
+
+        var originalRequest = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://original"}""",
+            requestId: requestId);
+
+        await using (var db = CreateDbContext())
+        {
+            var original = await CreateCompletionService(db).CompleteAsync(
+                originalRequest, CancellationToken.None);
+            Assert.Equal(200, original.StatusCode);
+        }
+
+        var conflictingRequest = CreateCompletionRequest(
+            jobId, claim, worker, "Succeeded",
+            resultJson: """{"artifactUri":"test://conflict"}""",
+            requestId: requestId);
+
+        await using (var db = CreateDbContext())
+        {
+            var firstConflict = await CreateCompletionService(db).CompleteAsync(
+                conflictingRequest, CancellationToken.None);
+
+            Assert.Equal(409, firstConflict.StatusCode);
+            var response = DeserializeCompletionResponse(firstConflict);
+            Assert.Equal("IdempotencyKeyConflict", response.Outcome);
+            Assert.False(response.IsReplay);
+        }
+
+        CompleteJobResult replay;
+        await using (var db = CreateDbContext())
+        {
+            replay = await CreateCompletionService(db).CompleteAsync(
+                conflictingRequest, CancellationToken.None);
+        }
+
+        Assert.Equal(409, replay.StatusCode);
+        var replayResponse = DeserializeCompletionResponse(replay);
+        Assert.Equal("IdempotencyKeyConflict", replayResponse.Outcome);
+        Assert.Equal("AcceptedSucceeded", replayResponse.OriginalOutcome);
+        Assert.True(replayResponse.IsReplay);
+        Assert.Equal("Succeeded", replayResponse.CurrentJobStatus);
+        Assert.Equal("Succeeded", replayResponse.CurrentAttemptStatus);
+
+        await using var verify = CreateDbContext();
+        Assert.Single(await verify.CompletionRequests.ToListAsync());
+        Assert.Single(await verify.CompletionRequestConflicts.ToListAsync());
+
+        var job = await verify.Jobs.SingleAsync(x => x.JobId == jobId);
+        using var savedResult = JsonDocument.Parse(job.ResultDescriptorJson!);
+        Assert.Equal(
+            "test://original",
+            savedResult.RootElement.GetProperty("artifactUri").GetString());
+    }
+
     private static LeaseRecoveryService CreateLeaseRecoveryService(
         ForgeDbContext db,
         int maxAttempts = 3)
@@ -1428,6 +1936,8 @@ var rejected = Assert.Single(
         await db.Database.ExecuteSqlRawAsync(
             """
             TRUNCATE TABLE
+                completion_request_conflicts,
+                completion_requests,
                 lease_renewal_requests,
                 claim_requests,
                 job_attempts,

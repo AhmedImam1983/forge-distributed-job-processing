@@ -13,15 +13,18 @@ public sealed class JobsController : ControllerBase
     private readonly SubmitJobService _submitJobService;
     private readonly ClaimJobService _claimJobService;
     private readonly LeaseRenewalService _leaseRenewalService;
+    private readonly CompletionService _completionService;
 
     public JobsController(
         SubmitJobService submitJobService,
         ClaimJobService claimJobService,
-        LeaseRenewalService leaseRenewalService)
+        LeaseRenewalService leaseRenewalService,
+        CompletionService completionService)
     {
         _submitJobService = submitJobService;
         _claimJobService = claimJobService;
         _leaseRenewalService = leaseRenewalService;
+        _completionService = completionService;
     }
 
 
@@ -61,6 +64,27 @@ public sealed class JobsController : ControllerBase
         CancellationToken cancellationToken)
     {
         var result = await _claimJobService.ClaimAsync(
+            request,
+            cancellationToken);
+
+        return new ContentResult
+        {
+            StatusCode = result.StatusCode,
+            ContentType = "application/json; charset=utf-8",
+            Content = result.ResponseBodyJson
+        };
+    }
+
+    [HttpPost("complete")]
+    [ProducesResponseType(typeof(CompleteJobResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Complete(
+        [FromBody] CompleteJobRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _completionService.CompleteAsync(
             request,
             cancellationToken);
 

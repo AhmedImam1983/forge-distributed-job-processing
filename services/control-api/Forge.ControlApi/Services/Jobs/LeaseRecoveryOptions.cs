@@ -13,4 +13,7 @@ public sealed class LeaseRecoveryOptions
     public int InitialRetryDelaySeconds { get; set; } = 5;
 
     public int MaxRetryDelaySeconds { get; set; } = 300;
+
+    // Empty by default: failures are not retried unless explicitly allowed.
+    public List<string> RetryableFailureCodes { get; set; } = [];
 }

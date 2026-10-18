@@ -25,6 +25,11 @@ public sealed class ForgeDbContext : DbContext
 
     public DbSet<LeaseRenewalRequest> LeaseRenewalRequests => Set<LeaseRenewalRequest>();
 
+    public DbSet<CompletionRequest> CompletionRequests => Set<CompletionRequest>();
+
+    public DbSet<CompletionRequestConflict> CompletionRequestConflicts
+        => Set<CompletionRequestConflict>();
+
     protected override void OnModelCreating(
         ModelBuilder modelBuilder)
     {
@@ -36,6 +41,8 @@ public sealed class ForgeDbContext : DbContext
         ConfigureJobAttempt(modelBuilder);
         ConfigureClaimRequest(modelBuilder);
         ConfigureLeaseRenewalRequest(modelBuilder);
+        ConfigureCompletionRequest(modelBuilder);
+        ConfigureCompletionRequestConflict(modelBuilder);
     }
 
     private static void ConfigureJob(
@@ -77,6 +84,9 @@ public sealed class ForgeDbContext : DbContext
                     AND input_revision IS NOT NULL
                 )
                 """);
+            table.HasCheckConstraint(
+                "ck_jobs_result_descriptor_object",
+                "result_descriptor_json IS NULL OR jsonb_typeof(result_descriptor_json) = 'object'");
         });
 
         job.HasKey(x => x.JobId);
@@ -106,6 +116,10 @@ public sealed class ForgeDbContext : DbContext
 
         job.Property(x => x.InputRevision)
             .HasColumnName("input_revision");
+
+        job.Property(x => x.ResultDescriptorJson)
+            .HasColumnName("result_descriptor_json")
+            .HasColumnType("jsonb");
 
         job.Property(x => x.CreatedAt)
             .HasColumnName("created_at")
@@ -628,6 +642,161 @@ public sealed class ForgeDbContext : DbContext
 
         request.HasIndex(x => new { x.AttemptId, x.DecidedAt })
             .HasDatabaseName("ix_lease_renewal_requests_attempt_decided_at");
+    }
+
+
+    private static void ConfigureCompletionRequest(
+        ModelBuilder modelBuilder)
+    {
+        var request = modelBuilder.Entity<CompletionRequest>();
+
+        request.ToTable("completion_requests", table =>
+        {
+            table.HasCheckConstraint(
+                "ck_completion_requests_worker",
+                "length(btrim(worker_instance_id)) > 0");
+
+            table.HasCheckConstraint(
+                "ck_completion_requests_fencing_token",
+                "fencing_token > 0");
+
+            table.HasCheckConstraint(
+                "ck_completion_requests_fingerprint",
+                "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+            table.HasCheckConstraint(
+                "ck_completion_requests_payload",
+                "jsonb_typeof(request_payload_json) = 'object'");
+
+            table.HasCheckConstraint(
+                "ck_completion_requests_outcome",
+                """
+                outcome IN (
+                    'AcceptedSucceeded',
+                    'AcceptedRetryScheduled',
+                    'AcceptedFailed',
+                    'AcceptedCancelled',
+                    'LeaseExpiredOrLost',
+                    'NotOwnerOrSuperseded',
+                    'CancellationPending',
+                    'AttemptAlreadyFinalized',
+                    'NotFound',
+                    'IdempotencyKeyConflict',
+                    'InvalidOutcomeForState'
+                )
+                """);
+        });
+
+        request.HasKey(x => x.CompletionRequestId)
+            .HasName("pk_completion_requests");
+
+        request.Property(x => x.CompletionRequestId)
+            .HasColumnName("completion_request_id")
+            .ValueGeneratedNever();
+
+        // Deliberately no foreign keys: NotFound decisions must be durable.
+        request.Property(x => x.JobId)
+            .HasColumnName("job_id")
+            .IsRequired();
+
+        request.Property(x => x.AttemptId)
+            .HasColumnName("attempt_id")
+            .IsRequired();
+
+        request.Property(x => x.WorkerInstanceId)
+            .HasColumnName("worker_instance_id")
+            .HasMaxLength(200)
+            .IsRequired();
+
+        request.Property(x => x.FencingToken)
+            .HasColumnName("fencing_token")
+            .IsRequired();
+
+        request.Property(x => x.RequestFingerprint)
+            .HasColumnName("request_fingerprint")
+            .HasMaxLength(64)
+            .IsRequired();
+
+        request.Property(x => x.RequestPayloadJson)
+            .HasColumnName("request_payload_json")
+            .HasColumnType("jsonb")
+            .IsRequired();
+
+        request.Property(x => x.Outcome)
+            .HasColumnName("outcome")
+            .HasConversion<string>()
+            .HasMaxLength(40)
+            .IsRequired();
+
+        request.Property(x => x.DecidedAt)
+            .HasColumnName("decided_at")
+            .HasDefaultValueSql("CURRENT_TIMESTAMP")
+            .ValueGeneratedOnAdd();
+
+        request.HasIndex(x => new { x.JobId, x.DecidedAt })
+            .HasDatabaseName("ix_completion_requests_job_decided_at");
+
+        request.HasIndex(x => new { x.AttemptId, x.DecidedAt })
+            .HasDatabaseName("ix_completion_requests_attempt_decided_at");
+    }
+
+
+    private static void ConfigureCompletionRequestConflict(
+        ModelBuilder modelBuilder)
+    {
+        var conflict = modelBuilder.Entity<CompletionRequestConflict>();
+
+        conflict.ToTable("completion_request_conflicts", table =>
+        {
+            table.HasCheckConstraint(
+                "ck_completion_request_conflicts_fingerprint",
+                "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+            table.HasCheckConstraint(
+                "ck_completion_request_conflicts_payload",
+                "jsonb_typeof(request_payload_json) = 'object'");
+
+            table.HasCheckConstraint(
+                "ck_completion_request_conflicts_outcome",
+                "outcome = 'IdempotencyKeyConflict'");
+        });
+
+        conflict.HasKey(x => new
+            {
+                x.CompletionRequestId,
+                x.RequestFingerprint
+            })
+            .HasName("pk_completion_request_conflicts");
+
+        conflict.Property(x => x.CompletionRequestId)
+            .HasColumnName("completion_request_id")
+            .ValueGeneratedNever();
+
+        conflict.Property(x => x.RequestFingerprint)
+            .HasColumnName("request_fingerprint")
+            .HasMaxLength(64)
+            .IsRequired();
+
+        conflict.Property(x => x.RequestPayloadJson)
+            .HasColumnName("request_payload_json")
+            .HasColumnType("jsonb")
+            .IsRequired();
+
+        conflict.Property(x => x.Outcome)
+            .HasColumnName("outcome")
+            .HasConversion<string>()
+            .HasMaxLength(40)
+            .IsRequired();
+
+        conflict.Property(x => x.DecidedAt)
+            .HasColumnName("decided_at")
+            .HasDefaultValueSql("CURRENT_TIMESTAMP")
+            .ValueGeneratedOnAdd();
+
+        conflict.HasOne<CompletionRequest>()
+            .WithMany()
+            .HasForeignKey(x => x.CompletionRequestId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 
 }
