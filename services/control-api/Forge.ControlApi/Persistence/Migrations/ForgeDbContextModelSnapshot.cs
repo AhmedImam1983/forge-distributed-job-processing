@@ -89,6 +89,117 @@ namespace Forge.ControlApi.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.CompletionRequest", b =>
+                {
+                    b.Property<Guid>("CompletionRequestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("completion_request_id");
+
+                    b.Property<Guid>("AttemptId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("attempt_id");
+
+                    b.Property<DateTimeOffset>("DecidedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("decided_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint")
+                        .HasColumnName("fencing_token");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("outcome");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("request_fingerprint");
+
+                    b.Property<string>("RequestPayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("request_payload_json");
+
+                    b.Property<string>("WorkerInstanceId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("worker_instance_id");
+
+                    b.HasKey("CompletionRequestId")
+                        .HasName("pk_completion_requests");
+
+                    b.HasIndex("AttemptId", "DecidedAt")
+                        .HasDatabaseName("ix_completion_requests_attempt_decided_at");
+
+                    b.HasIndex("JobId", "DecidedAt")
+                        .HasDatabaseName("ix_completion_requests_job_decided_at");
+
+                    b.ToTable("completion_requests", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_completion_requests_fencing_token", "fencing_token > 0");
+
+                            t.HasCheckConstraint("ck_completion_requests_fingerprint", "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("ck_completion_requests_outcome", "outcome IN (\n    'AcceptedSucceeded',\n    'AcceptedRetryScheduled',\n    'AcceptedFailed',\n    'AcceptedCancelled',\n    'LeaseExpiredOrLost',\n    'NotOwnerOrSuperseded',\n    'CancellationPending',\n    'AttemptAlreadyFinalized',\n    'NotFound',\n    'IdempotencyKeyConflict',\n    'InvalidOutcomeForState'\n)");
+
+                            t.HasCheckConstraint("ck_completion_requests_payload", "jsonb_typeof(request_payload_json) = 'object'");
+
+                            t.HasCheckConstraint("ck_completion_requests_worker", "length(btrim(worker_instance_id)) > 0");
+                        });
+                });
+
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.CompletionRequestConflict", b =>
+                {
+                    b.Property<Guid>("CompletionRequestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("completion_request_id");
+
+                    b.Property<string>("RequestFingerprint")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("request_fingerprint");
+
+                    b.Property<DateTimeOffset>("DecidedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("decided_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("outcome");
+
+                    b.Property<string>("RequestPayloadJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("request_payload_json");
+
+                    b.HasKey("CompletionRequestId", "RequestFingerprint")
+                        .HasName("pk_completion_request_conflicts");
+
+                    b.ToTable("completion_request_conflicts", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_completion_request_conflicts_fingerprint", "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("ck_completion_request_conflicts_outcome", "outcome = 'IdempotencyKeyConflict'");
+
+                            t.HasCheckConstraint("ck_completion_request_conflicts_payload", "jsonb_typeof(request_payload_json) = 'object'");
+                        });
+                });
+
             modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.Job", b =>
                 {
                     b.Property<Guid>("JobId")
@@ -131,6 +242,10 @@ namespace Forge.ControlApi.Persistence.Migrations
                         .HasColumnName("next_eligible_at")
                         .HasDefaultValueSql("CURRENT_TIMESTAMP");
 
+                    b.Property<string>("ResultDescriptorJson")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("result_descriptor_json");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .ValueGeneratedOnAdd()
@@ -149,6 +264,8 @@ namespace Forge.ControlApi.Persistence.Migrations
                             t.HasCheckConstraint("ck_jobs_input_representation", "(\n    input_payload_json IS NOT NULL\n    AND input_reference IS NULL\n    AND input_revision IS NULL\n)\nOR\n(\n    input_payload_json IS NULL\n    AND input_reference IS NOT NULL\n    AND input_revision IS NOT NULL\n)");
 
                             t.HasCheckConstraint("ck_jobs_last_fencing_token", "last_fencing_token >= 0");
+
+                            t.HasCheckConstraint("ck_jobs_result_descriptor_object", "result_descriptor_json IS NULL OR jsonb_typeof(result_descriptor_json) = 'object'");
 
                             t.HasCheckConstraint("ck_jobs_status", "status IN (\n    'Queued',\n    'Running',\n    'CancelRequested',\n    'Succeeded',\n    'Failed',\n    'Cancelled'\n)");
                         });
@@ -459,6 +576,15 @@ namespace Forge.ControlApi.Persistence.Migrations
                         .HasForeignKey("AttemptId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_claim_requests_job_attempts");
+                });
+
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.CompletionRequestConflict", b =>
+                {
+                    b.HasOne("Forge.ControlApi.Persistence.Entities.CompletionRequest", null)
+                        .WithMany()
+                        .HasForeignKey("CompletionRequestId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.JobAttempt", b =>

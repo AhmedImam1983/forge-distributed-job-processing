@@ -14,6 +14,8 @@ public class Job
 
     public string? InputRevision { get; set; }
 
+    public string? ResultDescriptorJson { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
 
     public DateTimeOffset NextEligibleAt { get; set; }

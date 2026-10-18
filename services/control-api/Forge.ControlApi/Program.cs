@@ -25,6 +25,7 @@ builder.Services.AddScoped<SubmitJobService>();
 builder.Services.AddScoped<ClaimJobService>();
 builder.Services.AddScoped<LeaseRenewalService>();
 builder.Services.AddScoped<LeaseRecoveryService>();
+builder.Services.AddScoped<CompletionService>();
 
 builder.Services.AddOptions<JobClaimOptions>()
     .Bind(builder.Configuration.GetSection(JobClaimOptions.SectionName))
@@ -51,6 +52,15 @@ builder.Services.AddOptions<LeaseRecoveryOptions>()
         options => options.MaxRetryDelaySeconds >= options.InitialRetryDelaySeconds
             && options.MaxRetryDelaySeconds <= 3600,
         "LeaseRecovery:MaxRetryDelaySeconds must be >= initial delay and <= 3600.")
+    .Validate(
+        options => options.RetryableFailureCodes is not null
+            && options.RetryableFailureCodes.Count <= 100
+            && options.RetryableFailureCodes.All(code =>
+                !string.IsNullOrWhiteSpace(code)
+                && code.Length <= 100
+                && code == code.Trim()
+                && code == code.ToUpperInvariant()),
+        "LeaseRecovery:RetryableFailureCodes must contain at most 100 non-empty uppercase codes of up to 100 characters.")
     .ValidateOnStart();
 
 builder.Services.AddScoped<
