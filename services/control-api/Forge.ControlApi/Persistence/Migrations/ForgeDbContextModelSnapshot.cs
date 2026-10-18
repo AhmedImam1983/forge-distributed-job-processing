@@ -22,6 +22,73 @@ namespace Forge.ControlApi.Persistence.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.ClaimRequest", b =>
+                {
+                    b.Property<Guid>("ClaimRequestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("claim_request_id");
+
+                    b.Property<Guid?>("AttemptId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("attempt_id");
+
+                    b.Property<DateTimeOffset>("DecidedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("decided_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<long?>("FencingToken")
+                        .HasColumnType("bigint")
+                        .HasColumnName("fencing_token");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lease_expires_at");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("outcome");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("request_fingerprint");
+
+                    b.Property<string>("WorkerInstanceId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("worker_instance_id");
+
+                    b.HasKey("ClaimRequestId")
+                        .HasName("pk_claim_requests");
+
+                    b.HasIndex("AttemptId")
+                        .HasDatabaseName("ix_claim_requests_attempt_id");
+
+                    b.HasIndex("JobId", "DecidedAt")
+                        .HasDatabaseName("ix_claim_requests_job_decided_at");
+
+                    b.ToTable("claim_requests", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_claim_requests_fencing_token", "fencing_token IS NULL OR fencing_token > 0");
+
+                            t.HasCheckConstraint("ck_claim_requests_fingerprint", "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("ck_claim_requests_outcome", "outcome IN (\n    'Granted',\n    'AlreadyOwnedBySameRequest',\n    'AlreadyClaimed',\n    'NotEligible',\n    'NotFound',\n    'ExpiredOrLost'\n)");
+
+                            t.HasCheckConstraint("ck_claim_requests_worker_instance_id", "length(btrim(worker_instance_id)) > 0");
+                        });
+                });
+
             modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.Job", b =>
                 {
                     b.Property<Guid>("JobId")
@@ -52,6 +119,12 @@ namespace Forge.ControlApi.Persistence.Migrations
                         .HasColumnType("character varying(100)")
                         .HasColumnName("job_type");
 
+                    b.Property<long>("LastFencingToken")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(0L)
+                        .HasColumnName("last_fencing_token");
+
                     b.Property<DateTimeOffset>("NextEligibleAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("timestamp with time zone")
@@ -75,7 +148,167 @@ namespace Forge.ControlApi.Persistence.Migrations
                         {
                             t.HasCheckConstraint("ck_jobs_input_representation", "(\n    input_payload_json IS NOT NULL\n    AND input_reference IS NULL\n    AND input_revision IS NULL\n)\nOR\n(\n    input_payload_json IS NULL\n    AND input_reference IS NOT NULL\n    AND input_revision IS NOT NULL\n)");
 
+                            t.HasCheckConstraint("ck_jobs_last_fencing_token", "last_fencing_token >= 0");
+
                             t.HasCheckConstraint("ck_jobs_status", "status IN (\n    'Queued',\n    'Running',\n    'CancelRequested',\n    'Succeeded',\n    'Failed',\n    'Cancelled'\n)");
+                        });
+                });
+
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.JobAttempt", b =>
+                {
+                    b.Property<Guid>("AttemptId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("attempt_id");
+
+                    b.Property<int>("AttemptNumber")
+                        .HasColumnType("integer")
+                        .HasColumnName("attempt_number");
+
+                    b.Property<DateTimeOffset>("ClaimedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("claimed_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("completed_at");
+
+                    b.Property<string>("FailureCode")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("failure_code");
+
+                    b.Property<string>("FailureMessage")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)")
+                        .HasColumnName("failure_message");
+
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint")
+                        .HasColumnName("fencing_token");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<DateTimeOffset>("LeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lease_expires_at");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("Running")
+                        .HasColumnName("status");
+
+                    b.Property<string>("WorkerInstanceId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("worker_instance_id");
+
+                    b.HasKey("AttemptId")
+                        .HasName("pk_job_attempts");
+
+                    b.HasIndex("JobId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_job_attempts_one_running_per_job")
+                        .HasFilter("status = 'Running'");
+
+                    b.HasIndex("JobId", "AttemptNumber")
+                        .IsUnique()
+                        .HasDatabaseName("ux_job_attempts_job_attempt_number");
+
+                    b.HasIndex("JobId", "FencingToken")
+                        .IsUnique()
+                        .HasDatabaseName("ux_job_attempts_job_fencing_token");
+
+                    b.HasIndex("Status", "LeaseExpiresAt")
+                        .HasDatabaseName("ix_job_attempts_status_lease_expires_at");
+
+                    b.ToTable("job_attempts", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_job_attempts_attempt_number", "attempt_number > 0");
+
+                            t.HasCheckConstraint("ck_job_attempts_fencing_token", "fencing_token > 0");
+
+                            t.HasCheckConstraint("ck_job_attempts_lease_after_claim", "lease_expires_at > claimed_at");
+
+                            t.HasCheckConstraint("ck_job_attempts_status", "status IN (\n    'Running',\n    'Succeeded',\n    'Failed',\n    'Cancelled',\n    'LeaseExpired'\n)");
+
+                            t.HasCheckConstraint("ck_job_attempts_worker_instance_id", "length(btrim(worker_instance_id)) > 0");
+                        });
+                });
+
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.LeaseRenewalRequest", b =>
+                {
+                    b.Property<Guid>("RenewRequestId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("renew_request_id");
+
+                    b.Property<Guid>("AttemptId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("attempt_id");
+
+                    b.Property<DateTimeOffset>("DecidedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("decided_at")
+                        .HasDefaultValueSql("CURRENT_TIMESTAMP");
+
+                    b.Property<long>("FencingToken")
+                        .HasColumnType("bigint")
+                        .HasColumnName("fencing_token");
+
+                    b.Property<Guid>("JobId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("job_id");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lease_expires_at");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("outcome");
+
+                    b.Property<string>("RequestFingerprint")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("request_fingerprint");
+
+                    b.Property<string>("WorkerInstanceId")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("worker_instance_id");
+
+                    b.HasKey("RenewRequestId")
+                        .HasName("pk_lease_renewal_requests");
+
+                    b.HasIndex("AttemptId", "DecidedAt")
+                        .HasDatabaseName("ix_lease_renewal_requests_attempt_decided_at");
+
+                    b.HasIndex("JobId", "DecidedAt")
+                        .HasDatabaseName("ix_lease_renewal_requests_job_decided_at");
+
+                    b.ToTable("lease_renewal_requests", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_lease_renewal_requests_expiry", "(\n    outcome = 'Renewed'\n    AND lease_expires_at IS NOT NULL\n)\nOR\n(\n    outcome <> 'Renewed'\n    AND lease_expires_at IS NULL\n)");
+
+                            t.HasCheckConstraint("ck_lease_renewal_requests_fencing_token", "fencing_token > 0");
+
+                            t.HasCheckConstraint("ck_lease_renewal_requests_fingerprint", "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+                            t.HasCheckConstraint("ck_lease_renewal_requests_outcome", "outcome IN (\n    'Renewed',\n    'LeaseExpiredOrLost',\n    'CancellationPending',\n    'NotOwnerOrSuperseded',\n    'NotFound'\n)");
+
+                            t.HasCheckConstraint("ck_lease_renewal_requests_worker", "length(btrim(worker_instance_id)) > 0");
                         });
                 });
 
@@ -217,6 +450,25 @@ namespace Forge.ControlApi.Persistence.Migrations
 
                             t.HasCheckConstraint("ck_submission_requests_outcome", "(\n    outcome = 'Accepted'\n    AND job_id IS NOT NULL\n    AND response_status_code BETWEEN 200 AND 299\n)\nOR\n(\n    outcome = 'Rejected'\n    AND job_id IS NULL\n    AND response_status_code BETWEEN 400 AND 499\n)");
                         });
+                });
+
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.ClaimRequest", b =>
+                {
+                    b.HasOne("Forge.ControlApi.Persistence.Entities.JobAttempt", null)
+                        .WithMany()
+                        .HasForeignKey("AttemptId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_claim_requests_job_attempts");
+                });
+
+            modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.JobAttempt", b =>
+                {
+                    b.HasOne("Forge.ControlApi.Persistence.Entities.Job", null)
+                        .WithMany()
+                        .HasForeignKey("JobId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_job_attempts_jobs");
                 });
 
             modelBuilder.Entity("Forge.ControlApi.Persistence.Entities.OutboxMessage", b =>

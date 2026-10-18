@@ -17,4 +17,7 @@ public class Job
     public DateTimeOffset CreatedAt { get; set; }
 
     public DateTimeOffset NextEligibleAt { get; set; }
+
+    // Monotonically increases whenever a new execution claim is granted.
+    public long LastFencingToken { get; set; }
 }

@@ -19,6 +19,12 @@ public sealed class ForgeDbContext : DbContext
     public DbSet<OutboxMessage> OutboxMessages
         => Set<OutboxMessage>();
 
+    public DbSet<JobAttempt> JobAttempts => Set<JobAttempt>();
+
+    public DbSet<ClaimRequest> ClaimRequests => Set<ClaimRequest>();
+
+    public DbSet<LeaseRenewalRequest> LeaseRenewalRequests => Set<LeaseRenewalRequest>();
+
     protected override void OnModelCreating(
         ModelBuilder modelBuilder)
     {
@@ -27,6 +33,9 @@ public sealed class ForgeDbContext : DbContext
         ConfigureJob(modelBuilder);
         ConfigureSubmissionRequest(modelBuilder);
         ConfigureOutbox(modelBuilder);
+        ConfigureJobAttempt(modelBuilder);
+        ConfigureClaimRequest(modelBuilder);
+        ConfigureLeaseRenewalRequest(modelBuilder);
     }
 
     private static void ConfigureJob(
@@ -48,6 +57,10 @@ public sealed class ForgeDbContext : DbContext
                     'Cancelled'
                 )
                 """);
+
+            table.HasCheckConstraint(
+                "ck_jobs_last_fencing_token",
+                "last_fencing_token >= 0");
 
             table.HasCheckConstraint(
                 "ck_jobs_input_representation",
@@ -103,6 +116,11 @@ public sealed class ForgeDbContext : DbContext
             .HasColumnName("next_eligible_at")
             .HasDefaultValueSql("CURRENT_TIMESTAMP")
             .ValueGeneratedOnAdd();
+
+        job.Property(x => x.LastFencingToken)
+            .HasColumnName("last_fencing_token")
+            .HasDefaultValue(0L)
+            .IsRequired();
 
         job.HasIndex(x => new
             {
@@ -314,4 +332,302 @@ public sealed class ForgeDbContext : DbContext
         .HasFilter("published_at IS NULL")
         .HasDatabaseName("ix_outbox_messages_dispatch");
 }
+
+    private static void ConfigureJobAttempt(ModelBuilder modelBuilder)
+    {
+        var attempt = modelBuilder.Entity<JobAttempt>();
+
+        attempt.ToTable("job_attempts", table =>
+        {
+            table.HasCheckConstraint(
+                "ck_job_attempts_status",
+                """
+                status IN (
+                    'Running',
+                    'Succeeded',
+                    'Failed',
+                    'Cancelled',
+                    'LeaseExpired'
+                )
+                """);
+
+            table.HasCheckConstraint(
+                "ck_job_attempts_attempt_number",
+                "attempt_number > 0");
+
+            table.HasCheckConstraint(
+                "ck_job_attempts_worker_instance_id",
+                "length(btrim(worker_instance_id)) > 0");
+
+            table.HasCheckConstraint(
+                "ck_job_attempts_fencing_token",
+                "fencing_token > 0");
+
+            table.HasCheckConstraint(
+                "ck_job_attempts_lease_after_claim",
+                "lease_expires_at > claimed_at");
+        });
+
+        attempt.HasKey(x => x.AttemptId)
+            .HasName("pk_job_attempts");
+
+        attempt.Property(x => x.AttemptId)
+            .HasColumnName("attempt_id")
+            .ValueGeneratedNever();
+
+        attempt.Property(x => x.JobId)
+            .HasColumnName("job_id")
+            .IsRequired();
+
+        attempt.Property(x => x.AttemptNumber)
+            .HasColumnName("attempt_number")
+            .IsRequired();
+
+        attempt.Property(x => x.WorkerInstanceId)
+            .HasColumnName("worker_instance_id")
+            .HasMaxLength(200)
+            .IsRequired();
+
+        attempt.Property(x => x.FencingToken)
+            .HasColumnName("fencing_token")
+            .IsRequired();
+
+        attempt.Property(x => x.Status)
+            .HasColumnName("status")
+            .HasConversion<string>()
+            .HasMaxLength(32)
+            .HasDefaultValue(JobAttemptStatus.Running)
+            .IsRequired();
+
+        attempt.Property(x => x.ClaimedAt)
+            .HasColumnName("claimed_at")
+            .HasDefaultValueSql("CURRENT_TIMESTAMP")
+            .ValueGeneratedOnAdd();
+
+        attempt.Property(x => x.LeaseExpiresAt)
+            .HasColumnName("lease_expires_at")
+            .IsRequired();
+
+        attempt.Property(x => x.CompletedAt)
+            .HasColumnName("completed_at");
+
+        attempt.Property(x => x.FailureCode)
+            .HasColumnName("failure_code")
+            .HasMaxLength(100);
+
+        attempt.Property(x => x.FailureMessage)
+            .HasColumnName("failure_message")
+            .HasMaxLength(2000);
+
+        attempt.HasOne<Job>()
+            .WithMany()
+            .HasForeignKey(x => x.JobId)
+            .OnDelete(DeleteBehavior.Restrict)
+            .HasConstraintName("fk_job_attempts_jobs");
+
+        attempt.HasIndex(x => new { x.JobId, x.AttemptNumber })
+            .IsUnique()
+            .HasDatabaseName("ux_job_attempts_job_attempt_number");
+
+        attempt.HasIndex(x => new { x.JobId, x.FencingToken })
+            .IsUnique()
+            .HasDatabaseName("ux_job_attempts_job_fencing_token");
+
+        // A job can have at most one attempt in Running state.
+        attempt.HasIndex(x => x.JobId)
+            .IsUnique()
+            .HasFilter("status = 'Running'")
+            .HasDatabaseName("ux_job_attempts_one_running_per_job");
+
+        attempt.HasIndex(x => new { x.Status, x.LeaseExpiresAt })
+            .HasDatabaseName("ix_job_attempts_status_lease_expires_at");
+    }
+
+    private static void ConfigureClaimRequest(ModelBuilder modelBuilder)
+    {
+        var request = modelBuilder.Entity<ClaimRequest>();
+
+        request.ToTable("claim_requests", table =>
+        {
+            table.HasCheckConstraint(
+                "ck_claim_requests_worker_instance_id",
+                "length(btrim(worker_instance_id)) > 0");
+
+            table.HasCheckConstraint(
+                "ck_claim_requests_fingerprint",
+                "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+            table.HasCheckConstraint(
+                "ck_claim_requests_outcome",
+                """
+                outcome IN (
+                    'Granted',
+                    'AlreadyOwnedBySameRequest',
+                    'AlreadyClaimed',
+                    'NotEligible',
+                    'NotFound',
+                    'ExpiredOrLost'
+                )
+                """);
+
+            table.HasCheckConstraint(
+                "ck_claim_requests_fencing_token",
+                "fencing_token IS NULL OR fencing_token > 0");
+        });
+
+        request.HasKey(x => x.ClaimRequestId)
+            .HasName("pk_claim_requests");
+
+        request.Property(x => x.ClaimRequestId)
+            .HasColumnName("claim_request_id")
+            .ValueGeneratedNever();
+
+        // JobId deliberately isn't configured as a foreign key:
+        // a NotFound outcome must also be retained for idempotent retries.
+        request.Property(x => x.JobId)
+            .HasColumnName("job_id")
+            .IsRequired();
+
+        request.Property(x => x.WorkerInstanceId)
+            .HasColumnName("worker_instance_id")
+            .HasMaxLength(200)
+            .IsRequired();
+
+        request.Property(x => x.RequestFingerprint)
+            .HasColumnName("request_fingerprint")
+            .HasMaxLength(64)
+            .IsRequired();
+
+        request.Property(x => x.Outcome)
+            .HasColumnName("outcome")
+            .HasConversion<string>()
+            .HasMaxLength(32)
+            .IsRequired();
+
+        request.Property(x => x.AttemptId)
+            .HasColumnName("attempt_id");
+
+        request.Property(x => x.FencingToken)
+            .HasColumnName("fencing_token");
+
+        request.Property(x => x.LeaseExpiresAt)
+            .HasColumnName("lease_expires_at");
+
+        request.Property(x => x.DecidedAt)
+            .HasColumnName("decided_at")
+            .HasDefaultValueSql("CURRENT_TIMESTAMP")
+            .ValueGeneratedOnAdd();
+
+        request.HasOne<JobAttempt>()
+            .WithMany()
+            .HasForeignKey(x => x.AttemptId)
+            .OnDelete(DeleteBehavior.Restrict)
+            .HasConstraintName("fk_claim_requests_job_attempts");
+
+        request.HasIndex(x => x.AttemptId)
+            .HasDatabaseName("ix_claim_requests_attempt_id");
+
+        request.HasIndex(x => new { x.JobId, x.DecidedAt })
+            .HasDatabaseName("ix_claim_requests_job_decided_at");
+    }
+
+
+    private static void ConfigureLeaseRenewalRequest(
+        ModelBuilder modelBuilder)
+    {
+        var request = modelBuilder.Entity<LeaseRenewalRequest>();
+
+        request.ToTable("lease_renewal_requests", table =>
+        {
+            table.HasCheckConstraint(
+                "ck_lease_renewal_requests_worker",
+                "length(btrim(worker_instance_id)) > 0");
+
+            table.HasCheckConstraint(
+                "ck_lease_renewal_requests_fencing_token",
+                "fencing_token > 0");
+
+            table.HasCheckConstraint(
+                "ck_lease_renewal_requests_fingerprint",
+                "request_fingerprint ~ '^[0-9a-f]{64}$'");
+
+            table.HasCheckConstraint(
+                "ck_lease_renewal_requests_outcome",
+                """
+                outcome IN (
+                    'Renewed',
+                    'LeaseExpiredOrLost',
+                    'CancellationPending',
+                    'NotOwnerOrSuperseded',
+                    'NotFound'
+                )
+                """);
+
+            table.HasCheckConstraint(
+                "ck_lease_renewal_requests_expiry",
+                """
+                (
+                    outcome = 'Renewed'
+                    AND lease_expires_at IS NOT NULL
+                )
+                OR
+                (
+                    outcome <> 'Renewed'
+                    AND lease_expires_at IS NULL
+                )
+                """);
+        });
+
+        request.HasKey(x => x.RenewRequestId)
+            .HasName("pk_lease_renewal_requests");
+
+        request.Property(x => x.RenewRequestId)
+            .HasColumnName("renew_request_id")
+            .ValueGeneratedNever();
+
+        // Intentionally no FK on JobId or AttemptId: rejected NotFound
+        // and stale-attempt outcomes must also be stored durably.
+        request.Property(x => x.JobId)
+            .HasColumnName("job_id")
+            .IsRequired();
+
+        request.Property(x => x.AttemptId)
+            .HasColumnName("attempt_id")
+            .IsRequired();
+
+        request.Property(x => x.WorkerInstanceId)
+            .HasColumnName("worker_instance_id")
+            .HasMaxLength(200)
+            .IsRequired();
+
+        request.Property(x => x.FencingToken)
+            .HasColumnName("fencing_token")
+            .IsRequired();
+
+        request.Property(x => x.RequestFingerprint)
+            .HasColumnName("request_fingerprint")
+            .HasMaxLength(64)
+            .IsRequired();
+
+        request.Property(x => x.Outcome)
+            .HasColumnName("outcome")
+            .HasConversion<string>()
+            .HasMaxLength(40)
+            .IsRequired();
+
+        request.Property(x => x.LeaseExpiresAt)
+            .HasColumnName("lease_expires_at");
+
+        request.Property(x => x.DecidedAt)
+            .HasColumnName("decided_at")
+            .HasDefaultValueSql("CURRENT_TIMESTAMP")
+            .ValueGeneratedOnAdd();
+
+        request.HasIndex(x => new { x.JobId, x.DecidedAt })
+            .HasDatabaseName("ix_lease_renewal_requests_job_decided_at");
+
+        request.HasIndex(x => new { x.AttemptId, x.DecidedAt })
+            .HasDatabaseName("ix_lease_renewal_requests_attempt_decided_at");
+    }
+
 }

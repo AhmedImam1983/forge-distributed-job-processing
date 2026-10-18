@@ -117,6 +117,20 @@ A job and an execution attempt are different concepts.
 - A retry must not reuse the previous attemptId or restore
   an expired claim.
 
+### V1 Lease Recovery Policy
+
+- An expired execution lease is classified as retryable in V1.
+- The default maximum is three total attempts, including the initial attempt.
+- By default, retry delays start at five seconds and double after
+  each expired attempt, capped at 300 seconds. These values are
+  configurable through the `LeaseRecovery` settings.
+- The retry delay determines both `NextEligibleAt` and the outbox
+  message's `NextAttemptAt`.
+- If the attempt limit is exhausted, the job becomes `Failed`.
+- If cancellation is pending when the lease expires, recovery revokes
+  the expired claim and finalizes the job as `Cancelled` without retrying.
+- Every retry creates a new attempt and uses a higher fencing token.
+
 ## Cancellation and Completion Race
 
 Cancellation and successful completion may race.
