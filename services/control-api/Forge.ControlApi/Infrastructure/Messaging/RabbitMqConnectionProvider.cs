@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 
@@ -85,11 +86,45 @@ public sealed class RabbitMqConnectionProvider : IAsyncDisposable
             autoDelete: false,
             cancellationToken: cancellationToken);
 
+        IDictionary<string, object?>? queueArguments = null;
+
+        if (!string.IsNullOrWhiteSpace(_options.DeadLetterExchangeName))
+        {
+            await channel.ExchangeDeclareAsync(
+                exchange: _options.DeadLetterExchangeName,
+                type: ExchangeType.Direct,
+                durable: true,
+                autoDelete: false,
+                cancellationToken: cancellationToken);
+
+            await channel.QueueDeclareAsync(
+                queue: _options.DeadLetterQueueName!,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                cancellationToken: cancellationToken);
+
+            await channel.QueueBindAsync(
+                queue: _options.DeadLetterQueueName!,
+                exchange: _options.DeadLetterExchangeName,
+                routingKey: _options.DeadLetterRoutingKey!,
+                cancellationToken: cancellationToken);
+
+            queueArguments = new Dictionary<string, object?>
+            {
+                ["x-dead-letter-exchange"] =
+                    _options.DeadLetterExchangeName,
+                ["x-dead-letter-routing-key"] =
+                    _options.DeadLetterRoutingKey!
+            };
+        }
+
         await channel.QueueDeclareAsync(
             queue: _options.QueueName,
             durable: true,
             exclusive: false,
             autoDelete: false,
+            arguments: queueArguments,
             cancellationToken: cancellationToken);
 
         await channel.QueueBindAsync(

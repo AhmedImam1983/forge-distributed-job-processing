@@ -21,4 +21,11 @@ public sealed class RabbitMqOptions
 
     public string RoutingKey { get; set; } =
         "job.available.v1";
+
+    // Optional dead-letter topology. Leave unset to preserve existing queues.
+    public string? DeadLetterExchangeName { get; set; }
+
+    public string? DeadLetterQueueName { get; set; }
+
+    public string? DeadLetterRoutingKey { get; set; }
 }
